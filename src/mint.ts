@@ -1,0 +1,336 @@
+import * as dotenv from "dotenv";
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
+import pinataSDK from "@pinata/sdk";
+import algosdk from "algosdk";
+import type { Metadata } from "./types";
+import { CID, CIDVersion } from "multiformats/cid";
+
+import { decodeAddress } from 'algosdk'
+import * as mfsha2 from 'multiformats/hashes/sha2'
+import * as digest from 'multiformats/hashes/digest'
+export const ARC3_NAME_SUFFIX = '@arc3'
+export const ARC3_URL_SUFFIX = '#arc3'
+export const METADATA_FILE = 'metadata.json'
+export const JSON_TYPE = 'application/json'
+const proxy_path = '';
+import axios from "axios";
+
+dotenv.config();
+
+const basePath = process.cwd() + "/src/imagefiles/";
+const mintNumber = 400;
+const pinata = pinataSDK(
+  process.env.PINATA_API_KEY as string,
+  process.env.PINATA_SECRET_KEY as string
+);
+
+const algodClient = new algosdk.Algodv2(
+  process.env.ALGOD_TOKEN as string,
+  process.env.ALGOD_SERVER,
+  process.env.ALGOD_PORT
+);
+
+
+
+
+  export async function update(assetId: number, claimedByAddress: string) {
+    //get asset info from indexer
+    let { data } = await axios.get(`https://mainnet-idx.algonode.cloud/v2/assets/${assetId}?include-all=true`);
+    let metadata: Metadata = await getARC19Data(data);
+    const assetInfo = data['asset'];
+    //get metadata object
+    
+    // Pin metadata JSON to IPFS and get CID
+    let metadataCID = "";
+    let url = "";
+    let reserveAddress = "";
+
+    metadata.properties = {
+      
+    };
+
+    try {
+      const response = await pinata.pinJSONToIPFS(metadata, {
+        pinataOptions: {
+          cidVersion: 1,
+        },
+      });
+
+      metadataCID = response.IpfsHash;
+    } catch (error) {
+      console.error("error pinning metadata to IPFS", error);
+    }
+
+    // Decode the metadata CID to derive the Reserve Address and URL
+    const decodedCID = CID.parse(metadataCID);
+
+    // Derive the Reserve Address
+    reserveAddress = algosdk.encodeAddress(
+      Uint8Array.from(Buffer.from(decodedCID.multihash.digest))
+    );
+
+    // Derive the URL
+    const getCodec = (code: number) => {
+      // As per multiformats table
+      // https://github.com/multiformats/multicodec/blob/master/table.csv#L9
+      switch (code.toString(16)) {
+        case "55":
+          return "raw";
+        case "70":
+          return "dag-pb";
+      }
+    };
+
+    const version = decodedCID.version;
+    const code = decodedCID.code;
+    const codec = getCodec(code);
+
+    url = `template-ipfs://{ipfscid:${version}:${codec}:reserve:sha2-256}`;
+
+    // Mint the NFT!
+    const MNEMONIC = process.env.MNEMONIC as string;
+    const { addr: ADDRESS, sk: SECRET_KEY } =
+      algosdk.mnemonicToSecretKey(MNEMONIC);
+
+    //hash, upload an send acfg txn
+    try {
+      const suggestedParams = await algodClient.getTransactionParams().do();
+
+      const transaction =
+        algosdk.makeAssetConfigTxnWithSuggestedParamsFromObject({ 
+          from: ADDRESS,
+          assetIndex: assetId,
+          reserve: reserveAddress,
+          suggestedParams,
+          manager: ADDRESS,
+
+          strictEmptyAddressChecking: false
+        });
+
+      const signedTransaction = transaction.signTxn(SECRET_KEY);
+      const transactionId = transaction.txID().toString();
+
+      await algodClient.sendRawTransaction(signedTransaction).do();
+
+      const confirmedTxn = await algosdk.waitForConfirmation(
+        algodClient,
+        transactionId,
+        4
+      );
+    } catch (error) {
+      console.error("error updating NFT", error);
+    }
+
+  }
+
+export default async function mint() {
+  console.log("Minting...");
+
+  for (var i = 0; i < mintNumber; i++) {
+    
+    let index = i + 1;
+    let imageSrc = `imagename.png`
+    console.log(`Minting NFT (${index}) of ${mintNumber}`);
+    const imagePath = path.join(basePath, imageSrc);
+    const imageBuffer = fs.readFileSync(imagePath);
+
+    let imageChecksum = "";
+    let imageCID = "";
+    let metadataCID = "";
+    let url = "";
+    let reserveAddress = "";
+
+    // Get sha-256 checksum of image
+    imageChecksum = crypto
+      .createHash("sha256")
+      .update(imageBuffer)
+      .digest("base64");
+
+    // Pin image to IPFS and get CID
+    const readableStreamForImage = fs.createReadStream(imagePath);
+
+    try {
+      const response = await pinata.pinFileToIPFS(readableStreamForImage, {
+        pinataOptions: {
+          cidVersion: 1,
+        },
+      });
+
+      imageCID = response.IpfsHash;
+    } catch (error) {
+      console.error("error pinning image to IPFS", error);
+    }
+
+    // Pin metadata JSON to IPFS and get CID
+    const metadata: Metadata = {
+      name: ``,
+      description: "",
+      image: "ipfs://" + imageCID,
+      image_integrity: "sha256-" + imageChecksum,
+      image_mimetype: "image/png",
+      external_url: "",
+      properties: {
+        
+      },
+    };
+
+    try {
+      const response = await pinata.pinJSONToIPFS(metadata, {
+        pinataOptions: {
+          cidVersion: 1,
+        },
+      });
+
+      metadataCID = response.IpfsHash;
+    } catch (error) {
+      console.error("error pinning metadata to IPFS", error);
+    }
+
+    // Decode the metadata CID to derive the Reserve Address and URL
+    const decodedCID = CID.parse(metadataCID);
+
+    // Derive the Reserve Address
+    reserveAddress = algosdk.encodeAddress(
+      Uint8Array.from(Buffer.from(decodedCID.multihash.digest))
+    );
+
+    // Derive the URL
+    const getCodec = (code: number) => {
+      // As per multiformats table
+      // https://github.com/multiformats/multicodec/blob/master/table.csv#L9
+      switch (code.toString(16)) {
+        case "55":
+          return "raw";
+        case "70":
+          return "dag-pb";
+      }
+    };
+
+    const version = decodedCID.version;
+    const code = decodedCID.code;
+    const codec = getCodec(code);
+
+    url = `template-ipfs://{ipfscid:${version}:${codec}:reserve:sha2-256}`;
+
+    // Mint the NFT!
+    const MNEMONIC = process.env.MNEMONIC as string;
+    const { addr: ADDRESS, sk: SECRET_KEY } =
+      algosdk.mnemonicToSecretKey(MNEMONIC);
+
+    try {
+      const suggestedParams = await algodClient.getTransactionParams().do();
+
+      const transaction =
+        algosdk.makeAssetCreateTxnWithSuggestedParamsFromObject({
+          from: ADDRESS,
+          assetName: ``,
+          unitName: "",
+          assetURL: url,
+          manager: ADDRESS, // It's important to set the manager to the creator so that the NFT metadata can be updated
+          reserve: reserveAddress,
+          decimals: 0,
+          total: 1,
+          suggestedParams,
+          defaultFrozen: false,
+        });
+
+      const signedTransaction = transaction.signTxn(SECRET_KEY);
+      const transactionId = transaction.txID().toString();
+
+      await algodClient.sendRawTransaction(signedTransaction).do();
+
+      const confirmedTxn = await algosdk.waitForConfirmation(
+        algodClient,
+        transactionId,
+        4
+      );
+
+      console.log("Succesfully minted!");
+      console.log("\n");
+      console.log("Asset ID:", confirmedTxn["asset-index"]);
+      console.log("URL:", url);
+      console.log("Reserve Address:", reserveAddress);
+      console.log("Metadata CID:", metadataCID);
+      console.log("Image CID:", imageCID);
+      console.log("\n");
+      console.log(
+        "View your NFT at: ",
+        "https://arc3.xyz/nft/" + confirmedTxn["asset-index"]
+      );
+      console.log("\n");
+    } catch (error) {
+      console.error("error minting NFT", error);
+    }
+  }
+}
+
+const getARC19Data = async (nft: any) => {
+
+  let ipfs_proxy = nft['asset']['params']['url'];
+  let arc19url = resolveProtocol(ipfs_proxy, nft.asset['params']['reserve'])
+  const response = await axios.get(arc19url);
+  let arc3Data = await response.data;
+  return arc3Data;
+}
+
+function resolveProtocol(url: string, reserveAddr: string) {
+
+  if (url.endsWith(ARC3_URL_SUFFIX))
+      url = url.slice(0, url.length - ARC3_URL_SUFFIX.length)
+
+  let chunks = url.split('://')
+  // Check if prefix is template-ipfs and if {ipfscid:..} is where CID would normally be
+  if (chunks[0] === 'template-ipfs' && chunks[1].startsWith('{ipfscid:')) {
+      // Look for something like: template:ipfs://{ipfscid:1:raw:reserve:sha2-256} and parse into components
+      chunks[0] = 'ipfs'
+      const cidComponents = chunks[1].split(':')
+      if (cidComponents.length !== 5) {
+          // give up
+          console.log('unknown ipfscid format')
+          return url
+      }
+      const [, cidVersion, cidCodec, asaField, cidHash] = cidComponents
+
+      // const cidVersionInt = parseInt(cidVersion) as CIDVersion
+      if (cidHash.split('}')[0] !== 'sha2-256') {
+          console.log('unsupported hash:', cidHash)
+          return url
+      }
+      if (cidCodec !== 'raw' && cidCodec !== 'dag-pb') {
+          console.log('unsupported codec:', cidCodec)
+          return url
+      }
+      if (asaField !== 'reserve') {
+          console.log('unsupported asa field:', asaField)
+          return url
+      }
+      let cidCodecCode
+      if (cidCodec === 'raw') {
+          cidCodecCode = 0x55
+      } else if (cidCodec === 'dag-pb') {
+          cidCodecCode = 0x70
+      }
+
+      //console.log(reserveAddr)
+      // get 32 bytes Uint8Array reserve address - treating it as 32-byte sha2-256 hash
+      const addr = decodeAddress(reserveAddr)
+      const mhdigest = digest.create(mfsha2.sha256.code, addr.publicKey)
+
+      const cid = CID.create( 1, Number(cidCodecCode), mhdigest)
+      chunks[1] = cid.toString() + '/' + chunks[1].split('/').slice(1).join('/')
+  }
+
+  //Switch on the protocol
+  switch (chunks[0]) {
+      case 'ipfs': {
+          return proxy_path + chunks[1]
+      }
+      case 'https': //Its already http, just return it
+          return url
+      // TODO: Future options may include arweave or algorand
+  }
+
+  return url
+}
